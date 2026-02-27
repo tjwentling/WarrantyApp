@@ -39,6 +39,13 @@
           "icon": "./assets/icon.png",
           "color": "#1E3A8A"
         }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "WarrantyApp uses your camera to scan barcodes on product boxes and tags.",
+          "microphonePermission": false
+        }
       ]
     ],
     "experiments": {

@@ -1,12 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  ScrollView, Alert, ActivityIndicator, KeyboardAvoidingView, Platform,
+  ScrollView, Alert, ActivityIndicator, KeyboardAvoidingView,
+  Platform, Image,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { supabase } from '../../lib/supabase';
 import { colors, spacing, radius, fontSize } from '../../lib/theme';
 import { Category } from '../../lib/types';
+import { ProductInfo } from '../../lib/upcLookup';
 
 const CATEGORIES: Category[] = [
   'Electronics', 'Appliances', 'Vehicles', 'Furniture',
@@ -26,7 +28,9 @@ function categoryEmoji(cat: Category) {
 
 export default function AddItemScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ prefill?: string }>();
   const [loading, setLoading] = useState(false);
+  const [scannedProduct, setScannedProduct] = useState<ProductInfo | null>(null);
 
   // Item fields
   const [name, setName] = useState('');
@@ -42,6 +46,21 @@ export default function AddItemScreen() {
   const [warrantyStart, setWarrantyStart] = useState('');
   const [warrantyEnd, setWarrantyEnd] = useState('');
   const [coverageNotes, setCoverageNotes] = useState('');
+
+  // Pre-fill from scan result
+  useEffect(() => {
+    if (params.prefill) {
+      try {
+        const product: ProductInfo = JSON.parse(params.prefill as string);
+        setScannedProduct(product);
+        if (product.name) setName(product.name);
+        if (product.brand) setBrand(product.brand);
+        if (product.model) setModel(product.model);
+        if (product.category) setCategory(product.category as Category);
+        if (product.description) setNotes(product.description);
+      } catch {}
+    }
+  }, [params.prefill]);
 
   const handleSave = async () => {
     if (!name.trim()) {
@@ -82,11 +101,16 @@ export default function AddItemScreen() {
     setLoading(false);
     Alert.alert('Item Added!', `${name} has been added to your possessions.`, [
       { text: 'View Item', onPress: () => router.replace(`/items/${item!.id}`) },
-      { text: 'Add Another', onPress: () => {
-        setName(''); setBrand(''); setModel(''); setSerial('');
-        setCategory(null); setPurchaseDate(''); setNotes('');
-        setAddWarranty(false); setWarrantyStart(''); setWarrantyEnd(''); setCoverageNotes('');
-      }},
+      {
+        text: 'Add Another',
+        onPress: () => {
+          setScannedProduct(null);
+          setName(''); setBrand(''); setModel(''); setSerial('');
+          setCategory(null); setPurchaseDate(''); setNotes('');
+          setAddWarranty(false); setWarrantyStart(''); setWarrantyEnd('');
+          setCoverageNotes('');
+        },
+      },
     ]);
   };
 
@@ -97,9 +121,58 @@ export default function AddItemScreen() {
     >
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
 
-        {/* ── Item Details ─────────────────────── */}
-        <SectionLabel title="Item Details" />
+        {/* ── Scan Banner ──────────────────────── */}
+        {!scannedProduct ? (
+          <TouchableOpacity
+            style={styles.scanBanner}
+            onPress={() => router.push('/items/scan')}
+          >
+            <Text style={styles.scanBannerIcon}>📷</Text>
+            <View style={styles.scanBannerText}>
+              <Text style={styles.scanBannerTitle}>Scan a Barcode</Text>
+              <Text style={styles.scanBannerSub}>
+                Point your camera at any UPC or barcode to auto-fill this form
+              </Text>
+            </View>
+            <Text style={styles.scanBannerArrow}>›</Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.scannedBanner}>
+            {scannedProduct.imageUrl ? (
+              <Image source={{ uri: scannedProduct.imageUrl }} style={styles.scannedImage} />
+            ) : (
+              <View style={styles.scannedImagePlaceholder}>
+                <Text style={{ fontSize: 28 }}>
+                  {category ? categoryEmoji(category as Category) : '📦'}
+                </Text>
+              </View>
+            )}
+            <View style={styles.scannedInfo}>
+              <Text style={styles.scannedLabel}>✅ Barcode Scanned</Text>
+              <Text style={styles.scannedName} numberOfLines={2}>
+                {scannedProduct.name ?? 'Unknown product'}
+              </Text>
+              {scannedProduct.brand && (
+                <Text style={styles.scannedBrand}>{scannedProduct.brand}</Text>
+              )}
+              <Text style={styles.scannedUpc}>UPC: {scannedProduct.upc}</Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => router.push('/items/scan')}
+              style={styles.rescanBtn}
+            >
+              <Text style={styles.rescanBtnText}>Rescan</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
+        <View style={styles.divider}>
+          <View style={styles.dividerLine} />
+          <Text style={styles.dividerText}>Item Details</Text>
+          <View style={styles.dividerLine} />
+        </View>
+
+        {/* ── Item Details ─────────────────────── */}
         <FieldLabel>Item Name *</FieldLabel>
         <TextInput
           style={styles.input}
@@ -135,7 +208,7 @@ export default function AddItemScreen() {
         <FieldLabel>Serial Number</FieldLabel>
         <TextInput
           style={styles.input}
-          placeholder="Found on the label or manual"
+          placeholder="Found on the label or in the manual"
           placeholderTextColor={colors.textLight}
           value={serial}
           onChangeText={setSerial}
@@ -261,93 +334,93 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   content: { padding: spacing.md },
+
+  scanBanner: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: colors.primaryDark, borderRadius: radius.md,
+    padding: spacing.md, gap: spacing.sm, marginBottom: spacing.md,
+  },
+  scanBannerIcon: { fontSize: 28 },
+  scanBannerText: { flex: 1 },
+  scanBannerTitle: { color: colors.textInverse, fontSize: fontSize.md, fontWeight: '700' },
+  scanBannerSub: { color: 'rgba(255,255,255,0.7)', fontSize: fontSize.xs, marginTop: 2 },
+  scanBannerArrow: { color: colors.textInverse, fontSize: 22 },
+
+  scannedBanner: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: colors.successBg, borderRadius: radius.md,
+    borderWidth: 1, borderColor: colors.successBorder,
+    padding: spacing.md, gap: spacing.sm, marginBottom: spacing.md,
+  },
+  scannedImage: { width: 56, height: 56, borderRadius: radius.sm },
+  scannedImagePlaceholder: {
+    width: 56, height: 56, borderRadius: radius.sm,
+    backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center',
+  },
+  scannedInfo: { flex: 1 },
+  scannedLabel: {
+    fontSize: fontSize.xs, fontWeight: '700', color: colors.success,
+    textTransform: 'uppercase', letterSpacing: 0.5,
+  },
+  scannedName: { fontSize: fontSize.sm, fontWeight: '700', color: colors.text, marginTop: 2 },
+  scannedBrand: { fontSize: fontSize.xs, color: colors.textMuted },
+  scannedUpc: { fontSize: fontSize.xs, color: colors.textLight, marginTop: 2 },
+  rescanBtn: {
+    paddingHorizontal: spacing.sm, paddingVertical: spacing.xs,
+    borderRadius: radius.full, borderWidth: 1, borderColor: colors.success,
+  },
+  rescanBtnText: { color: colors.success, fontSize: fontSize.xs, fontWeight: '700' },
+
+  divider: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md },
+  dividerLine: { flex: 1, height: 1, backgroundColor: colors.border },
+  dividerText: {
+    fontSize: fontSize.xs, fontWeight: '700', color: colors.textMuted,
+    textTransform: 'uppercase', letterSpacing: 1,
+  },
+
   sectionLabel: {
-    fontSize: fontSize.xs,
-    fontWeight: '700',
-    color: colors.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginTop: spacing.lg,
-    marginBottom: spacing.sm,
+    fontSize: fontSize.xs, fontWeight: '700', color: colors.textMuted,
+    textTransform: 'uppercase', letterSpacing: 1,
+    marginTop: spacing.lg, marginBottom: spacing.sm,
   },
-  fieldLabel: {
-    fontSize: fontSize.sm,
-    fontWeight: '600',
-    color: colors.text,
-    marginBottom: spacing.xs,
-  },
+  fieldLabel: { fontSize: fontSize.sm, fontWeight: '600', color: colors.text, marginBottom: spacing.xs },
   input: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 12,
-    fontSize: fontSize.md,
-    color: colors.text,
-    backgroundColor: colors.card,
-    marginBottom: spacing.md,
+    borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
+    paddingHorizontal: spacing.md, paddingVertical: 12,
+    fontSize: fontSize.md, color: colors.text, backgroundColor: colors.card, marginBottom: spacing.md,
   },
   textArea: { minHeight: 80, paddingTop: 12 },
   row: { flexDirection: 'row', gap: spacing.sm },
   halfField: { flex: 1 },
-  catGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginBottom: spacing.md,
-  },
+  catGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.md },
   catBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-    borderRadius: radius.full,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.card,
+    flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+    paddingHorizontal: spacing.sm, paddingVertical: spacing.xs,
+    borderRadius: radius.full, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card,
   },
   catBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   catEmoji: { fontSize: 16 },
   catLabel: { fontSize: fontSize.sm, color: colors.textMuted },
   catLabelActive: { color: colors.textInverse, fontWeight: '600' },
   toggleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    marginVertical: spacing.md,
-    padding: spacing.md,
-    backgroundColor: colors.card,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
+    marginVertical: spacing.md, padding: spacing.md,
+    backgroundColor: colors.card, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
   },
   checkbox: {
-    width: 24,
-    height: 24,
-    borderRadius: 6,
-    borderWidth: 2,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: 24, height: 24, borderRadius: 6,
+    borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center',
   },
   checkboxActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   checkmark: { color: colors.textInverse, fontSize: 14, fontWeight: '700' },
   toggleLabel: { fontSize: fontSize.md, color: colors.text, fontWeight: '500' },
   warrantyCard: {
-    backgroundColor: colors.card,
-    borderRadius: radius.md,
-    padding: spacing.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    marginBottom: spacing.md,
+    backgroundColor: colors.card, borderRadius: radius.md,
+    padding: spacing.md, borderWidth: 1, borderColor: colors.border, marginBottom: spacing.md,
   },
   saveBtn: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginTop: spacing.md,
+    backgroundColor: colors.primary, borderRadius: radius.md,
+    paddingVertical: 16, alignItems: 'center', marginTop: spacing.md,
   },
   saveBtnDisabled: { opacity: 0.6 },
   saveBtnText: { color: colors.textInverse, fontSize: fontSize.lg, fontWeight: '700' },

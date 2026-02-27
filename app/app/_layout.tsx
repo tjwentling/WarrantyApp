@@ -58,6 +58,17 @@ function RootLayoutNav() {
             headerTitleStyle: { fontWeight: '700' },
           }}
         />
+        <Stack.Screen
+          name="items/scan"
+          options={{
+            headerShown: true,
+            title: 'Scan Barcode',
+            presentation: 'fullScreenModal',
+            headerStyle: { backgroundColor: '#000' },
+            headerTintColor: '#fff',
+            headerTitleStyle: { fontWeight: '700', color: '#fff' },
+          }}
+        />
       </Stack>
     </>
   );
