@@ -1,0 +1,22 @@
+# Environment variables — never commit these
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+.expo/
+
+# Build outputs
+dist/
+build/
+android/
+ios/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
