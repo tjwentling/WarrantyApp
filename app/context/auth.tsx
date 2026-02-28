@@ -1,7 +1,20 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import { Platform } from 'react-native';
 import { Session, User } from '@supabase/supabase-js';
+import * as Notifications from 'expo-notifications';
 import { supabase } from '../lib/supabase';
 import { Profile } from '../lib/types';
+
+// ── Notification presentation handler (foreground) ──────────────
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
 
 interface AuthContextType {
   session: Session | null;
@@ -20,6 +33,59 @@ const AuthContext = createContext<AuthContextType>({
   signOut: async () => {},
   refreshProfile: async () => {},
 });
+
+// ── Register Expo push token and save to Supabase ────────────────
+async function registerPushToken(userId: string) {
+  try {
+    // Ask for permission
+    const { status: existing } = await Notifications.getPermissionsAsync();
+    let finalStatus = existing;
+
+    if (existing !== 'granted') {
+      const { status } = await Notifications.requestPermissionsAsync();
+      finalStatus = status;
+    }
+
+    if (finalStatus !== 'granted') {
+      console.log('Push notification permission denied');
+      return;
+    }
+
+    // Android requires a notification channel
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync('recall-alerts', {
+        name: 'Recall Alerts',
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#DC2626',
+        sound: 'default',
+      });
+      await Notifications.setNotificationChannelAsync('warranty-reminders', {
+        name: 'Warranty Reminders',
+        importance: Notifications.AndroidImportance.HIGH,
+        sound: 'default',
+      });
+    }
+
+    // Get the push token (requires a real device or Expo Go)
+    const tokenData = await Notifications.getExpoPushTokenAsync({
+      projectId: 'warrantyapp',  // Matches app.json slug
+    }).catch(() => null);
+
+    if (!tokenData?.data) return;
+
+    // Save token to profile
+    await supabase
+      .from('profiles')
+      .update({ push_token: tokenData.data })
+      .eq('id', userId);
+
+    console.log('Push token registered:', tokenData.data.slice(0, 30) + '…');
+  } catch (err) {
+    // Non-fatal — app works without push
+    console.warn('Push registration failed:', err);
+  }
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
@@ -42,7 +108,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
-      if (session?.user) fetchProfile(session.user.id);
+      if (session?.user) {
+        fetchProfile(session.user.id);
+        registerPushToken(session.user.id);
+      }
       setLoading(false);
     });
 
@@ -50,12 +119,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setSession(session);
       if (session?.user) {
         fetchProfile(session.user.id);
+        registerPushToken(session.user.id);
       } else {
         setProfile(null);
       }
     });
 
-    return () => subscription.unsubscribe();
+    // Listen for incoming notifications while app is open
+    const notifListener = Notifications.addNotificationReceivedListener(notification => {
+      console.log('Notification received:', notification.request.content.title);
+    });
+
+    // Handle notification tap (app opens from notification)
+    const responseListener = Notifications.addNotificationResponseReceivedListener(response => {
+      const data = response.notification.request.content.data as any;
+      console.log('Notification tapped, data:', data);
+      // Navigation handled at screen level via deep link / router
+    });
+
+    return () => {
+      subscription.unsubscribe();
+      Notifications.removeNotificationSubscription(notifListener);
+      Notifications.removeNotificationSubscription(responseListener);
+    };
   }, []);
 
   const signOut = async () => {
