@@ -1,16 +1,26 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, Alert, Linking,
+  ActivityIndicator, Alert, Linking, Image, ActionSheetIOS, Platform,
 } from 'react-native';
-import { useLocalSearchParams, useRouter, useNavigation } from 'expo-router';
+import { useLocalSearchParams, useRouter, useNavigation, useFocusEffect } from 'expo-router';
 import { supabase } from '../../lib/supabase';
+import { useAuth } from '../../context/auth';
 import { colors, spacing, radius, fontSize, shadow } from '../../lib/theme';
 import { Item, Warranty, ItemRecall } from '../../lib/types';
+import { pickAndUploadReceipt, takeAndUploadReceipt, deleteReceipt } from '../../lib/receiptUpload';
 
 type FullItem = Item & {
   warranties: Warranty[];
   item_recalls: (ItemRecall & { recalls: any })[];
+  receipt_urls?: string[];
+};
+
+type TransferRecord = {
+  id: string;
+  transferred_at: string;
+  from_user: { full_name: string | null; username: string | null } | null;
+  to_user: { full_name: string | null; username: string | null } | null;
 };
 
 function categoryEmoji(cat: string | null) {
@@ -27,25 +37,43 @@ export default function ItemDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const navigation = useNavigation();
+  const { user } = useAuth();
   const [item, setItem] = useState<FullItem | null>(null);
+  const [transfers, setTransfers] = useState<TransferRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [uploadingReceipt, setUploadingReceipt] = useState(false);
 
   const load = async () => {
-    const { data } = await supabase
-      .from('items')
-      .select(`
-        *,
-        warranties(*),
-        item_recalls(*, recalls(*))
-      `)
-      .eq('id', id)
-      .single();
-    setItem(data as FullItem);
+    const [itemRes, transferRes] = await Promise.all([
+      supabase
+        .from('items')
+        .select('*, warranties(*), item_recalls(*, recalls(*))')
+        .eq('id', id)
+        .single(),
+      supabase
+        .from('ownership_transfers')
+        .select(`
+          id, transferred_at,
+          from_user:from_user_id(full_name, username),
+          to_user:to_user_id(full_name, username)
+        `)
+        .eq('item_id', id)
+        .order('transferred_at', { ascending: false }),
+    ]);
+    setItem(itemRes.data as FullItem);
+    setTransfers((transferRes.data ?? []) as TransferRecord[]);
   };
 
   useEffect(() => {
     load().finally(() => setLoading(false));
   }, [id]);
+
+  // Refresh when navigating back from warranty screen
+  useFocusEffect(
+    useCallback(() => {
+      if (!loading) load();
+    }, [id])
+  );
 
   useEffect(() => {
     if (item) navigation.setOptions({ title: item.name });
@@ -67,6 +95,59 @@ export default function ItemDetailScreen() {
         },
       ]
     );
+  };
+
+  const handleAddReceipt = () => {
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        { options: ['Cancel', 'Take a Photo', 'Choose from Library'], cancelButtonIndex: 0 },
+        async (idx) => {
+          if (idx === 1) await doUpload('camera');
+          if (idx === 2) await doUpload('library');
+        }
+      );
+    } else {
+      Alert.alert('Add Receipt', 'Choose a source', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Take Photo', onPress: () => doUpload('camera') },
+        { text: 'Photo Library', onPress: () => doUpload('library') },
+      ]);
+    }
+  };
+
+  const doUpload = async (source: 'camera' | 'library') => {
+    if (!user?.id || !id) return;
+    setUploadingReceipt(true);
+    try {
+      const result = source === 'camera'
+        ? await takeAndUploadReceipt(user.id, id)
+        : await pickAndUploadReceipt(user.id, id);
+
+      if (result) {
+        const existingUrls: string[] = item?.receipt_urls ?? [];
+        const newUrls = [...existingUrls, result.path];
+        await supabase.from('items').update({ receipt_urls: newUrls }).eq('id', id);
+        await load();
+      }
+    } finally {
+      setUploadingReceipt(false);
+    }
+  };
+
+  const handleDeleteReceipt = (path: string, index: number) => {
+    Alert.alert('Remove Receipt', 'Remove this photo?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          await deleteReceipt(path);
+          const newUrls = (item?.receipt_urls ?? []).filter((_, i) => i !== index);
+          await supabase.from('items').update({ receipt_urls: newUrls }).eq('id', id);
+          await load();
+        },
+      },
+    ]);
   };
 
   if (loading) {
@@ -149,6 +230,33 @@ export default function ItemDetailScreen() {
             )}
           </>
         )}
+        <TouchableOpacity
+          style={styles.editWarrantyBtn}
+          onPress={() => router.push(`/items/warranty/${item.id}`)}
+        >
+          <Text style={styles.editWarrantyText}>
+            {warranties.length ? '✏️ Edit Warranty' : '+ Add Warranty'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Receipts & Documents */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>📷 Receipts & Documents</Text>
+          <TouchableOpacity onPress={handleAddReceipt} disabled={uploadingReceipt}>
+            {uploadingReceipt
+              ? <ActivityIndicator size="small" color={colors.primary} />
+              : <Text style={styles.addReceiptLink}>+ Add</Text>}
+          </TouchableOpacity>
+        </View>
+        {item.receipt_urls && item.receipt_urls.length > 0 ? (
+          <ReceiptGrid paths={item.receipt_urls} itemId={id} userId={user?.id ?? ''} onDelete={handleDeleteReceipt} />
+        ) : (
+          <TouchableOpacity style={styles.emptyReceipts} onPress={handleAddReceipt}>
+            <Text style={styles.emptyReceiptsText}>📄 Tap to add a receipt or warranty card photo</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* Recalls */}
@@ -193,6 +301,30 @@ export default function ItemDetailScreen() {
         </View>
       )}
 
+      {/* Transfer History */}
+      {transfers.length > 0 && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>🔄 Ownership History</Text>
+          <View style={styles.detailsCard}>
+            {transfers.map((t, i) => (
+              <View key={t.id} style={[styles.transferRow, i < transfers.length - 1 && styles.transferRowBorder]}>
+                <Text style={styles.transferEmoji}>→</Text>
+                <View style={styles.transferBody}>
+                  <Text style={styles.transferText}>
+                    <Text style={styles.transferName}>{t.from_user?.full_name ?? t.from_user?.username ?? 'Previous owner'}</Text>
+                    {' → '}
+                    <Text style={styles.transferName}>{t.to_user?.full_name ?? t.to_user?.username ?? 'New owner'}</Text>
+                  </Text>
+                  <Text style={styles.transferDate}>
+                    {new Date(t.transferred_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+                  </Text>
+                </View>
+              </View>
+            ))}
+          </View>
+        </View>
+      )}
+
       {/* Actions */}
       <View style={styles.actions}>
         <TouchableOpacity
@@ -210,6 +342,68 @@ export default function ItemDetailScreen() {
     </ScrollView>
   );
 }
+
+/** Renders receipt thumbnails in a 3-column grid with delete support */
+function ReceiptGrid({
+  paths, itemId, userId, onDelete,
+}: { paths: string[]; itemId: string; userId: string; onDelete: (path: string, index: number) => void }) {
+  const [urls, setUrls] = useState<string[]>([]);
+
+  useEffect(() => {
+    const load = async () => {
+      const signed = await Promise.all(
+        paths.map(async (p) => {
+          const { data } = await supabase.storage.from('receipts').createSignedUrl(p, 3600);
+          return data?.signedUrl ?? '';
+        })
+      );
+      setUrls(signed);
+    };
+    load();
+  }, [paths]);
+
+  return (
+    <View style={receiptStyles.grid}>
+      {paths.map((path, i) => (
+        <TouchableOpacity
+          key={path}
+          style={receiptStyles.thumb}
+          onLongPress={() => onDelete(path, i)}
+        >
+          {urls[i] ? (
+            <Image source={{ uri: urls[i] }} style={receiptStyles.image} resizeMode="cover" />
+          ) : (
+            <View style={receiptStyles.placeholder}>
+              <Text style={receiptStyles.placeholderText}>📄</Text>
+            </View>
+          )}
+        </TouchableOpacity>
+      ))}
+    </View>
+  );
+}
+
+const receiptStyles = StyleSheet.create({
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  thumb: {
+    width: 88,
+    height: 88,
+    borderRadius: radius.sm,
+    overflow: 'hidden',
+    backgroundColor: colors.border,
+  },
+  image: { width: '100%', height: '100%' },
+  placeholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  placeholderText: { fontSize: 28 },
+});
 
 function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -293,6 +487,13 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginBottom: spacing.sm,
   },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.sm,
+  },
+  addReceiptLink: { fontSize: fontSize.sm, color: colors.primary, fontWeight: '600' },
   detailsCard: {
     backgroundColor: colors.card,
     borderRadius: radius.md,
@@ -324,6 +525,24 @@ const styles = StyleSheet.create({
   },
   warrantyTitle: { fontSize: fontSize.md, fontWeight: '700', color: colors.text },
   warrantyStatus: { fontSize: fontSize.sm, fontWeight: '600' },
+  editWarrantyBtn: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  editWarrantyText: { fontSize: fontSize.sm, color: colors.primary, fontWeight: '600' },
+
+  emptyReceipts: {
+    backgroundColor: colors.card,
+    borderRadius: radius.md,
+    padding: spacing.lg,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderStyle: 'dashed',
+  },
+  emptyReceiptsText: { fontSize: fontSize.sm, color: colors.textMuted },
 
   recallCard: {
     backgroundColor: colors.recallBg,
@@ -348,6 +567,23 @@ const styles = StyleSheet.create({
   recallInfoText: { fontSize: fontSize.sm, color: colors.textMuted, lineHeight: 20 },
   recallLink: { marginTop: spacing.sm, paddingTop: spacing.sm, borderTopWidth: 1, borderTopColor: colors.recallBorder },
   recallLinkText: { fontSize: fontSize.sm, color: colors.recall, fontWeight: '600' },
+
+  transferRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 12,
+  },
+  transferRowBorder: {
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  transferEmoji: { fontSize: 16, color: colors.textMuted },
+  transferBody: { flex: 1 },
+  transferText: { fontSize: fontSize.sm, color: colors.text },
+  transferName: { fontWeight: '600', color: colors.primary },
+  transferDate: { fontSize: fontSize.xs, color: colors.textMuted, marginTop: 2 },
 
   actions: { gap: spacing.sm, marginTop: spacing.md },
   transferBtn: {

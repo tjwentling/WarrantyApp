@@ -90,7 +90,7 @@ function mapCPSCCategory(id: string): string {
 // ─────────────────────────────────────────────────────────────
 async function fetchFDA(): Promise<NormalisedRecall[]> {
   const endpoints = [
-    { url: `https://api.fda.gov/food/enforcement.json?limit=50&sort=recall_initiation_date:desc`, category: 'Food & Beverage' },
+    { url: `https://api.fda.gov/food/enforcement.json?limit=100&sort=recall_initiation_date:desc`, category: 'Food & Beverage' },
     { url: `https://api.fda.gov/drug/enforcement.json?limit=50&sort=recall_initiation_date:desc`, category: 'Medical Devices' },
     { url: `https://api.fda.gov/device/enforcement.json?limit=50&sort=recall_initiation_date:desc`, category: 'Medical Devices' },
   ];
@@ -100,27 +100,25 @@ async function fetchFDA(): Promise<NormalisedRecall[]> {
   for (const ep of endpoints) {
     try {
       const res = await fetch(ep.url, { headers: { 'User-Agent': 'WarrantyApp/1.0' } });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        console.warn(`FDA endpoint returned ${res.status} for ${ep.category}`);
+        continue;
+      }
       const json = await res.json();
       const items: any[] = json.results ?? [];
 
-      // Filter to last 7 days
-      const recent = items.filter((r: any) => {
-        const dateStr = r.recall_initiation_date ?? '';
-        if (!dateStr) return true;
-        // FDA format: YYYYMMDD
-        const d = new Date(`${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`);
-        return d >= SEVEN_DAYS_AGO;
-      });
-
-      for (const r of recent) {
+      // Take all returned results — the API already sorts by most recent
+      // We use ON CONFLICT DO NOTHING in upsert so duplicates are safe
+      for (const r of items) {
+        const recallNum = r.recall_number ?? r.event_id;
+        if (!recallNum) continue;
         results.push({
           source: 'FDA',
-          external_id: `FDA-${r.recall_number ?? r.event_id ?? Math.random()}`,
-          title: r.product_description?.slice(0, 200) ?? 'FDA Recall',
+          external_id: `FDA-${recallNum}`,
+          title: (r.product_description ?? 'FDA Recall').slice(0, 200),
           description: r.reason_for_recall ?? null,
-          hazard: r.code_info ?? r.classification ?? null,
-          remedy: 'Contact manufacturer or retailer for instructions',
+          hazard: r.classification ? `Class ${r.classification} recall` : (r.code_info ?? null),
+          remedy: 'Contact manufacturer or retailer for instructions.',
           affected_products: [{
             brand: r.recalling_firm ?? null,
             name: r.product_description ?? null,
@@ -132,6 +130,7 @@ async function fetchFDA(): Promise<NormalisedRecall[]> {
           url: null,
         });
       }
+      console.log(`FDA fetched ${items.length} records for ${ep.category}`);
     } catch (err) {
       console.error(`FDA fetch failed (${ep.category}):`, err);
     }
@@ -150,39 +149,73 @@ function dateFromFDA(raw: string | null): string | null {
 //  https://www.fsis.usda.gov/fsis/api/recall/v/1
 // ─────────────────────────────────────────────────────────────
 async function fetchUSDA(): Promise<NormalisedRecall[]> {
-  try {
-    const res = await fetch('https://www.fsis.usda.gov/fsis/api/recall/v/1', {
-      headers: { 'User-Agent': 'WarrantyApp/1.0', 'Accept': 'application/json' },
-    });
-    if (!res.ok) throw new Error(`USDA HTTP ${res.status}`);
-    const data: any[] = await res.json();
+  // Try multiple USDA endpoints — the API structure varies
+  const urls = [
+    'https://www.fsis.usda.gov/fsis/api/recall/v/1',
+    'https://www.fsis.usda.gov/fsis/api/recall/v1/docs',
+  ];
 
-    return data
-      .filter((r: any) => {
-        const d = new Date(r.recall_date ?? r.press_release_date ?? '');
-        return !isNaN(d.getTime()) && d >= SEVEN_DAYS_AGO;
-      })
-      .map((r: any): NormalisedRecall => ({
-        source: 'USDA',
-        external_id: `USDA-${r.recall_number ?? r.id}`,
-        title: `${r.establishment_name ?? 'Unknown'} — ${r.recall_class ?? ''} Recall`,
-        description: r.reason_for_recall ?? r.products?.[0]?.product_name ?? null,
-        hazard: r.recall_class ? `Class ${r.recall_class} recall` : null,
-        remedy: 'Do not consume. Return to place of purchase or discard.',
-        affected_products: (r.products ?? []).map((p: any) => ({
-          brand: r.establishment_name ?? null,
-          name: p.product_name ?? null,
-          model: null,
-          upc: p.pkg_sizes ?? null,
-          category: 'Food & Beverage',
-        })),
-        recall_date: r.recall_date?.split('T')[0] ?? r.press_release_date?.split('T')[0] ?? null,
-        url: r.press_release_url ?? null,
-      }));
-  } catch (err) {
-    console.error('USDA fetch failed:', err);
-    return [];
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'WarrantyApp/1.0', 'Accept': 'application/json' },
+      });
+      if (!res.ok) {
+        console.warn(`USDA ${url} returned ${res.status}`);
+        continue;
+      }
+
+      let raw: any = await res.json();
+      // API may return array directly or wrapped in a key
+      const data: any[] = Array.isArray(raw)
+        ? raw
+        : (raw.data ?? raw.results ?? raw.recalls ?? []);
+
+      if (!data.length) {
+        console.log(`USDA: no data at ${url}`);
+        continue;
+      }
+
+      const mapped = data
+        .filter((r: any) => r.recall_number || r.id)
+        .map((r: any): NormalisedRecall => {
+          const id = r.recall_number ?? r.field_recall_number ?? r.id;
+          const products: any[] = r.products ?? r.field_products ?? [];
+          return {
+            source: 'USDA',
+            external_id: `USDA-${id}`,
+            title: `${r.establishment_name ?? r.field_establishment ?? 'Unknown'} — ${r.recall_class ?? r.field_recall_class ?? ''} Recall`.trim(),
+            description: r.reason_for_recall ?? r.field_reason_for_recall ?? (products[0]?.product_name ?? null),
+            hazard: (r.recall_class ?? r.field_recall_class) ? `Class ${r.recall_class ?? r.field_recall_class} recall` : null,
+            remedy: 'Do not consume. Return to place of purchase or discard.',
+            affected_products: products.length
+              ? products.map((p: any) => ({
+                  brand: r.establishment_name ?? r.field_establishment ?? null,
+                  name: p.product_name ?? p.field_product_name ?? null,
+                  model: null,
+                  upc: p.pkg_sizes ?? p.field_pkg_sizes ?? null,
+                  category: 'Food & Beverage',
+                }))
+              : [{
+                  brand: r.establishment_name ?? r.field_establishment ?? null,
+                  name: r.field_product ?? r.product_name ?? null,
+                  model: null,
+                  upc: null,
+                  category: 'Food & Beverage',
+                }],
+            recall_date: (r.recall_date ?? r.field_recall_date ?? r.press_release_date ?? '')?.split('T')[0] ?? null,
+            url: r.press_release_url ?? r.field_press_release_url ?? null,
+          };
+        });
+
+      console.log(`USDA fetched ${mapped.length} records`);
+      return mapped;
+    } catch (err) {
+      console.error(`USDA fetch failed (${url}):`, err);
+    }
   }
+
+  return [];
 }
 
 // ─────────────────────────────────────────────────────────────

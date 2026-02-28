@@ -2,6 +2,8 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 import { Session, User } from '@supabase/supabase-js';
 import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useRouter } from 'expo-router';
 import { supabase } from '../lib/supabase';
 import { Profile } from '../lib/types';
 
@@ -91,6 +93,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  const router = useRouter();
 
   const fetchProfile = async (userId: string) => {
     const { data } = await supabase
@@ -115,11 +118,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLoading(false);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       setSession(session);
       if (session?.user) {
         fetchProfile(session.user.id);
         registerPushToken(session.user.id);
+        // Show onboarding for first-time users
+        if (_event === 'SIGNED_IN') {
+          const done = await AsyncStorage.getItem('onboarding_done');
+          if (!done) {
+            setTimeout(() => router.push('/onboarding'), 500);
+          }
+        }
       } else {
         setProfile(null);
       }
@@ -130,11 +140,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.log('Notification received:', notification.request.content.title);
     });
 
-    // Handle notification tap (app opens from notification)
+    // Handle notification tap — navigate to relevant screen
     const responseListener = Notifications.addNotificationResponseReceivedListener(response => {
       const data = response.notification.request.content.data as any;
       console.log('Notification tapped, data:', data);
-      // Navigation handled at screen level via deep link / router
+      if (data?.type === 'warranty' && data?.itemId) {
+        router.push(`/items/${data.itemId}`);
+      } else if (data?.notificationId) {
+        // Recall alert — go to Alerts tab
+        router.push('/(tabs)/alerts');
+      }
     });
 
     return () => {

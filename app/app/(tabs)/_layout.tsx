@@ -1,19 +1,29 @@
 import { Tabs } from 'expo-router';
 import { View, Text, StyleSheet } from 'react-native';
 import { colors } from '../../lib/theme';
+import { useUnreadCount } from '../../hooks/useUnreadCount';
 
-type IconProps = { focused: boolean; emoji: string; label: string };
+type IconProps = { focused: boolean; emoji: string; label: string; badge?: number };
 
-function TabIcon({ focused, emoji, label }: IconProps) {
+function TabIcon({ focused, emoji, label, badge }: IconProps) {
   return (
     <View style={styles.tabIcon}>
-      <Text style={styles.emoji}>{emoji}</Text>
+      <View>
+        <Text style={styles.emoji}>{emoji}</Text>
+        {badge != null && badge > 0 && (
+          <View style={styles.badge}>
+            <Text style={styles.badgeText}>{badge > 99 ? '99+' : badge}</Text>
+          </View>
+        )}
+      </View>
       <Text style={[styles.tabLabel, focused && styles.tabLabelActive]}>{label}</Text>
     </View>
   );
 }
 
 export default function TabLayout() {
+  const unreadCount = useUnreadCount();
+
   return (
     <Tabs
       screenOptions={{
@@ -45,7 +55,7 @@ export default function TabLayout() {
         options={{
           title: 'Alerts',
           tabBarIcon: ({ focused }) => (
-            <TabIcon focused={focused} emoji="🔔" label="Alerts" />
+            <TabIcon focused={focused} emoji="🔔" label="Alerts" badge={unreadCount} />
           ),
         }}
       />
@@ -87,5 +97,23 @@ const styles = StyleSheet.create({
   tabLabelActive: {
     color: colors.tabIconActive,
     fontWeight: '700',
+  },
+  badge: {
+    position: 'absolute',
+    top: -4,
+    right: -8,
+    backgroundColor: colors.recall,
+    borderRadius: 9999,
+    minWidth: 16,
+    height: 16,
+    paddingHorizontal: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeText: {
+    color: '#fff',
+    fontSize: 9,
+    fontWeight: '800',
+    lineHeight: 12,
   },
 });

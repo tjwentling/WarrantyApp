@@ -69,6 +69,25 @@ function RootLayoutNav() {
             headerTitleStyle: { fontWeight: '700', color: '#fff' },
           }}
         />
+        <Stack.Screen
+          name="items/warranty/[id]"
+          options={{
+            headerShown: true,
+            title: 'Warranty',
+            presentation: 'modal',
+            headerStyle: { backgroundColor: '#1D4ED8' },
+            headerTintColor: '#fff',
+            headerTitleStyle: { fontWeight: '700' },
+          }}
+        />
+        <Stack.Screen
+          name="onboarding"
+          options={{
+            headerShown: false,
+            presentation: 'fullScreenModal',
+            gestureEnabled: false,
+          }}
+        />
       </Stack>
     </>
   );
